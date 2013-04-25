@@ -2,7 +2,7 @@
 # encoding: utf-8
 """
 datamash.py
-Copyright (c) 2013 DatamashIO, All rights reserved.
+Copyright (c) 2013 DatamashIO Ltd. All rights reserved.
 """
 
 import re
@@ -11,14 +11,20 @@ import simplejson
 import urllib
 import urllib2
 
+import datamash
+from datamash.repository import Repository
+from datamash.resource import Resource
+
 
 API_HOST = 'datamash.io'
 API_PORT = 443
 API_VERSION = 'kowalski'
-API_VERIFY_SSL = True
 
 VALID_SERIES_KEY = r'^[a-zA-Z0-9\.:;\-_/\\ ]*$'
 RE_VALID_SERIES_KEY = re.compile(VALID_SERIES_KEY)
+
+
+def version(): return API_VERSION
 
 
 
@@ -32,6 +38,11 @@ class Client(object):
       self.session = requests.session()
       self.session.mount('http://', requests.adapters.HTTPAdapter(pool_connections=pool_connections, pool_maxsize=pool_maxsize))
       self.session.mount('https://', requests.adapters.HTTPAdapter(pool_connections=pool_connections, pool_maxsize=pool_maxsize))
+
+
+    def connect(self, url, synchronize=True):
+      json = self.request('/repositories?url=%s&sync=%s' % (url, str(synchronize).lower()), method='GET')
+      return Repository.from_json(json).set_client(self)
 
     def repositories(self):
       json = self.request('/repositories', method='GET')
@@ -49,23 +60,30 @@ class Client(object):
       json = self.request('/repositories', method='POST', params=params)
       return Repository.from_json(json)
 
-    def _get_repository_resources(self, repository_key):
-      json = self.request('/repositories/%s/resources' % (repository_key,), method='GET')
-      return map(lambda j: Resource(**dict(j.items() + {"client": self}.items())), json)
+    def _repository_resources(self, repository):
+      json = self.request('/repositories/%s/resources' % (repository.id,), method='GET')
+      return map(lambda j: Resource.from_json(j).set_client(self), json)
 
-    def _synchronize_repository(self, repository):
-      self.request('/repositories/%s/sync' % (repository.id,), method='POST', params={})
+    def _repository_resource(self, repository, name):
+      json = self.request('/repositories/%s/v/%s/resources/%s' % (repository.id, repository.version, name), method='GET')
+      return Resource.from_json(json).set_client(self)
 
-    def _get_repository_resource(self, repository, resource_key):
-      json = self.request('/repositories/%s/resources/%s' % (repository.key, resource_key), method='GET')
-      return Resource(**dict(json.items() + {"client": self}.items()))
+    def _repository_history(self, repository):
+      json = self.request('/repositories/%s/history' % (repository.id,), method='GET')
+      return json
+
+    def _repository_version(self, repository, version):
+      json = self.request('/repositories/%s/v/%s' % (repository.id, version), method='GET')
+      return Repository.from_json(json).set_client(self)
+
+    #def _synchronize_repository(self, repository):
+    #  self.request('/repositories/%s/sync' % (repository.id,), method='POST', params={})
 
     def _resource_data(self, resource):
-      return self.request('/resources/%s/data' % (resource.id, ), method='GET')
+      return self.request('/resources/%s/v/%s/data' % (resource.id, resource.version), method='GET')
 
-
-    def _resource_natural_language_query(self, resource, query):
-      return self.request('/resources/%s?query=%s' % (resource.id, query), method='GET')
+    #def _resource_natural_language_query(self, resource, query):
+    #  return self.request('/resources/%s?query=%s' % (resource.id, query), method='GET')
 
     def request(self, target, method='GET', params={}):
         assert method in ['GET', 'POST', 'PUT', 'DELETE'], "Only 'GET', 'POST', 'PUT', 'DELETE' are allowed for method."
@@ -79,17 +97,17 @@ class Client(object):
             headers['Content-Type'] = "application/json"
             base = self.build_full_url(target)
             print params
-            response = self.session.post(base, data=simplejson.dumps(params), auth=(self.key, ''), headers=headers, verify=API_VERIFY_SSL)
+            response = self.session.post(base, data=simplejson.dumps(params), auth=(self.key, ''), headers=headers)
         elif method == 'PUT':
             headers['Content-Type'] = "application/json"
             base = self.build_full_url(target)
-            response = self.session.put(base, data=simplejson.dumps(params), auth=(self.key, ''), headers=headers, verify=API_VERIFY_SSL)
+            response = self.session.put(base, data=simplejson.dumps(params), auth=(self.key, ''), headers=headers)
         elif method == 'DELETE':
             base = self.build_full_url(target, params)
-            response = self.session.delete(base, auth=(self.key, ''), headers=headers, verify=API_VERIFY_SSL)
+            response = self.session.delete(base, auth=(self.key, ''), headers=headers)
         else:
             base = self.build_full_url(target, params)
-            response = self.session.get(base, auth=(self.key, ''), headers=headers, verify=API_VERIFY_SSL)
+            response = self.session.get(base, auth=(self.key, ''), headers=headers)
 
         if response.status_code == 200:
             if response.text:
@@ -130,56 +148,6 @@ class Client(object):
                 p.append((key, value))
         return urllib.urlencode(p).encode("UTF-8")
 
-
-
-
-
-class Repository(object):
-
-  def __init__(self, **kwargs):
-    self.client = kwargs.get('client', None)
-    self.id = kwargs.get('id','')
-    self.key = kwargs.get('key','')
-    self.name = kwargs.get('name','')
-    self.status = kwargs.get('status','')
-
-  def to_json(self):
-    return {"id": self.id, "key": self.key, "name": self.name, "status": self.status}
-
-  def synchronize(self):
-    return self.client._synchronize_repository(self)
-
-  def resources(self):
-    return self.client._get_repository_resources(self.key)
-
-  def resource(self, resource_key):
-    return self.client._get_repository_resource(self, resource_key)
-
-
-
-
-class Resource(object):
-
-  def __init__(self, **kwargs):
-    self.client = kwargs.get('client', None)
-    self.id = kwargs.get('id','')
-    self.key = kwargs.get('key','')
-    self.schema = kwargs.get('schema',{})
-    self.count = kwargs.get('count',0)
-
-  def query(self, query):
-    return self.client._resource_natural_language_query(self, query)
-
-  def data(self):
-    return self.client._resource_data(self)
-
-  def to_json(self):
-    return {
-      "id": self.id,
-      "key": self.key,
-      "schema": self.schema,
-      "count": self.count
-    }
 
 
 class DatamashAPIException(Exception):

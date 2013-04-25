@@ -1,5 +1,8 @@
 .DS_Store
-.pyc
+*.pyc
 *.sublime-project
 *.sublime-workspace
 env
+dist
+nose*
+build
